@@ -15,6 +15,14 @@ const riskLabels = {
 
 const destinations = ["Patio Norte", "Patio Sul", "Doca 04", "Armazem 03", "Gate 02", "Navio Atlas"];
 
+let zones = [
+  zone("ZONE-A", "Area Restrita", "restricted", 8, 12, 24, 22),
+  zone("ZONE-B", "Armazem 03", "warehouse", 13, 67, 30, 21),
+  zone("ZONE-C", "Patio Norte", "yard", 38, 18, 24, 25),
+  zone("ZONE-D", "Gate 02", "gate", 76, 73, 19, 18),
+  zone("DOCK-04", "Doca 04 - Berco Atlas", "dock", 81, 9, 12, 72),
+];
+
 let assets = [
   asset("CNT-8812", "CNT-8812", "container", "Patio Norte", "Equipe Alfa", "Navio Atlas", "Aguardando embarque", "attention", 18, 26, 21800, 42),
   asset("CNT-4490", "CNT-4490", "container", "Patio Sul", "Equipe Delta", "Armazem 03", "Inspecao alfandegaria", "critical", 41, 58, 26500, 9),
@@ -32,9 +40,11 @@ let events = [
 ];
 
 let selectedId = assets[0].id;
+let selectedKind = "asset";
 let query = "";
 let activeLayer = "all";
 let replayHour = 9;
+let editMode = true;
 
 function asset(id, label, type, area, owner, destination, status, risk, x, y, weight, lastMoveMinutes) {
   return {
@@ -57,11 +67,27 @@ function asset(id, label, type, area, owner, destination, status, risk, x, y, we
   };
 }
 
+function zone(id, label, type, x, y, width, height) {
+  return { id, label, type, x, y, width, height };
+}
+
 function event(id, assetId, assetLabel, from, to, actor, authorizer, reason, time) {
   return { id, assetId, assetLabel, from, to, actor, authorizer, reason, time };
 }
 
-function filteredAssets() {
+function selectedAsset() {
+  return assets.find((item) => item.id === selectedId) || assets[0];
+}
+
+function selectedZone() {
+  return zones.find((item) => item.id === selectedId) || zones[0];
+}
+
+function selectedMapItem() {
+  return selectedKind === "zone" ? selectedZone() : selectedAsset();
+}
+
+function visibleAssets() {
   const normalized = query.trim().toLowerCase();
   return assets.filter((item) => {
     const matchesLayer = activeLayer === "all" || item.type === activeLayer;
@@ -74,40 +100,15 @@ function filteredAssets() {
   });
 }
 
-function selectedAsset() {
-  return assets.find((item) => item.id === selectedId) || assets[0];
+function setSelected(id) {
+  selectedId = id;
+  selectedKind = "asset";
+  render();
 }
 
-function moveSelectedAsset(destination) {
-  const current = selectedAsset();
-  const minute = String((events.length * 7 + 11) % 60).padStart(2, "0");
-  const newEvent = event(
-    `EVT-${String(events.length + 1).padStart(3, "0")}`,
-    current.id,
-    current.label,
-    current.area,
-    destination,
-    "Operador VISION",
-    "Torre de Controle",
-    "Movimentacao validada pelo motor espacial",
-    `09:${minute}`,
-  );
-
-  assets = assets.map((item) =>
-    item.id === selectedId
-      ? {
-          ...item,
-          area: destination,
-          destination: destination === "Navio Atlas" ? "Embarque confirmado" : item.destination,
-          status: "Movimentado agora",
-          lastMoveMinutes: 0,
-          x: Math.min(88, Math.max(12, item.x + 9 - events.length)),
-          y: Math.min(84, Math.max(16, item.y + 6)),
-          risk: destination === "Navio Atlas" ? "normal" : item.risk,
-        }
-      : item,
-  );
-  events = [newEvent, ...events];
+function setSelectedZone(id) {
+  selectedId = id;
+  selectedKind = "zone";
   render();
 }
 
@@ -116,25 +117,72 @@ function setLayer(layer) {
   render();
 }
 
-function setSelected(id) {
-  selectedId = id;
+function updateSelectedAsset(patch, reason = "Edicao cadastral") {
+  const before = selectedAsset();
+  assets = assets.map((item) => (item.id === selectedId ? { ...item, ...patch } : item));
+  const after = selectedAsset();
+
+  if (patch.area && patch.area !== before.area) {
+    appendEvent(before, before.area, patch.area, "Alteracao de area pelo editor");
+  } else if (patch.x !== undefined || patch.y !== undefined) {
+    appendEvent(after, before.area, after.area, reason);
+  }
+}
+
+function updateSelectedZone(patch) {
+  zones = zones.map((item) => (item.id === selectedId ? { ...item, ...patch } : item));
+}
+
+function moveSelectedAsset(destination) {
+  const current = selectedAsset();
+  updateSelectedAsset(
+    {
+      area: destination,
+      destination: destination === "Navio Atlas" ? "Embarque confirmado" : current.destination,
+      status: "Movimentado agora",
+      lastMoveMinutes: 0,
+      risk: destination === "Navio Atlas" ? "normal" : current.risk,
+    },
+    "Movimentacao operacional",
+  );
   render();
 }
 
-function iconGlyph(type) {
-  return {
-    container: "▤",
-    equipment: "⌁",
-    vehicle: "▰",
-    person: "●",
-    gate: "⌂",
-    sensor: "◌",
-  }[type];
+function repositionSelectedFromMap(pointerEvent) {
+  if (!editMode || pointerEvent.target.closest("[data-select]") || pointerEvent.target.closest("[data-zone]")) return;
+  const rect = pointerEvent.currentTarget.getBoundingClientRect();
+  const x = clamp(Math.round(((pointerEvent.clientX - rect.left) / rect.width) * 100), 2, 98);
+  const y = clamp(Math.round(((pointerEvent.clientY - rect.top) / rect.height) * 100), 2, 98);
+  if (selectedKind === "zone") {
+    updateSelectedZone({ x, y });
+  } else {
+    updateSelectedAsset({ x, y, status: "Posicao editada no mapa" }, "Reposicionamento no mapa");
+  }
+  render();
+}
+
+function appendEvent(item, from, to, reason) {
+  const minute = String((events.length * 7 + 11) % 60).padStart(2, "0");
+  events = [
+    event(
+      `EVT-${String(events.length + 1).padStart(3, "0")}`,
+      item.id,
+      item.label,
+      from,
+      to,
+      "Editor VISION",
+      "Controle Operacional",
+      reason,
+      `09:${minute}`,
+    ),
+    ...events,
+  ];
 }
 
 function render() {
   const selected = selectedAsset();
-  const visibleAssets = filteredAssets();
+  const selectedItem = selectedMapItem();
+  const filtered = visibleAssets();
   const criticalCount = assets.filter((item) => item.risk === "critical").length;
   const totalWeight = assets.reduce((sum, item) => sum + item.weight, 0);
   const app = document.getElementById("root");
@@ -152,79 +200,53 @@ function render() {
 
         <div class="search-panel">
           <label for="global-search">Busca global</label>
-          <input id="global-search" value="${escapeHtml(query)}" placeholder="Container, area, destino" />
+          <input id="global-search" value="${escapeHtml(query)}" placeholder="Ativo, area ou destino" />
         </div>
 
         <nav class="layer-list" aria-label="Camadas operacionais">
           ${layerButton("all", "Tudo")}
-          ${Object.entries(typeLabels)
-            .map(([type, label]) => layerButton(type, label))
-            .join("")}
+          ${Object.entries(typeLabels).map(([type, label]) => layerButton(type, label)).join("")}
         </nav>
 
         <section class="asset-list" aria-label="Objetos operacionais">
-          ${visibleAssets
-            .map(
-              (item) => `
-                <button class="asset-row ${item.id === selectedId ? "is-selected" : ""}" data-select="${item.id}">
-                  <span class="status-dot risk-${item.risk}"></span>
-                  <span>
-                    <strong>${item.label}</strong>
-                    <small>${item.area}</small>
-                  </span>
-                </button>
-              `,
-            )
-            .join("")}
+          ${filtered.map(assetRow).join("")}
         </section>
       </aside>
 
       <section class="command-center">
         <header class="top-bar">
           <div>
-            <h2>Digital Twin Corporativo</h2>
-            <p>Porto Santos-01 · operacao ao vivo · replay ${String(replayHour).padStart(2, "0")}:00</p>
+            <h2>Mapa Operacional</h2>
+            <p>Porto Santos-01 - Operacao ao vivo - Replay ${String(replayHour).padStart(2, "0")}:00</p>
           </div>
           <div class="top-actions">
-            ${iconButton("target", "Centralizar mapa")}
-            ${iconButton("layers", "Alternar camadas")}
-            ${iconButton("shield", "Abrir auditoria")}
+            <button type="button" class="${editMode ? "is-active" : ""}" id="toggle-edit">${editMode ? "Modo edicao" : "Modo consulta"}</button>
           </div>
         </header>
 
         <section class="metrics-grid" aria-label="Indicadores operacionais">
-          ${metric("Objetos vivos", String(assets.length), "+3 hoje")}
-          ${metric("Movimentacoes", String(events.length), "tempo real")}
-          ${metric("Riscos criticos", String(criticalCount), "acao imediata")}
+          ${metric("Objetos no mapa", String(assets.length), "cadastro ativo")}
+          ${metric("Movimentacoes", String(events.length), "auditadas")}
+          ${metric("Riscos criticos", String(criticalCount), "prioridade")}
           ${metric("Peso rastreado", `${Math.round(totalWeight / 1000)}t`, "sob custodia")}
         </section>
 
-        <section class="map-stage" aria-label="Mapa operacional">
+        <section class="map-toolbar">
+          <strong>${escapeHtml(selectedItem.label)}</strong>
+          <span>Clique em qualquer ponto do mapa para reposicionar o item selecionado.</span>
+          <span>X ${selectedItem.x} - Y ${selectedItem.y}${selectedKind === "asset" ? ` - Z ${selected.z}` : ""}</span>
+        </section>
+
+        <section class="map-stage" id="map-stage" aria-label="Mapa operacional editavel">
           <div class="map-grid"></div>
-          <div class="restricted-zone zone-a">Area Restrita</div>
-          <div class="restricted-zone zone-b">Armazem 03</div>
-          <div class="dock-line">Doca 04 · Berco Atlas</div>
-          ${visibleAssets
-            .map(
-              (item) => `
-                <button
-                  class="map-object ${item.type} risk-${item.risk} ${item.id === selectedId ? "is-selected" : ""}"
-                  style="left:${item.x}%; top:${item.y}%"
-                  data-select="${item.id}"
-                  aria-label="Selecionar ${item.label}"
-                >
-                  <span class="object-icon">${iconGlyph(item.type)}</span>
-                  <span>${item.label}</span>
-                </button>
-              `,
-            )
-            .join("")}
+          ${zones.map(mapZone).join("")}
+          ${filtered.map(mapObject).join("")}
         </section>
 
         <footer class="replay-strip">
           <div>
             <strong>Replay operacional</strong>
-            <span>Reconstrua o ambiente por data e hora</span>
+            <span>Reconstrucao historica do ambiente</span>
           </div>
           <input id="replay-hour" type="range" min="0" max="23" value="${replayHour}" aria-label="Hora do replay operacional" />
           <span class="replay-time">${String(replayHour).padStart(2, "0")}:00</span>
@@ -232,25 +254,9 @@ function render() {
       </section>
 
       <aside class="right-panel">
-        <section class="detail-card">
-          <div class="detail-heading">
-            <span class="status-dot risk-${selected.risk}"></span>
-            <div>
-              <h3>${selected.label}</h3>
-              <p>${typeLabels[selected.type]} · ${riskLabels[selected.risk]}</p>
-            </div>
-          </div>
-          <dl class="asset-specs">
-            ${spec("Local atual", selected.area)}
-            ${spec("Responsavel", selected.owner)}
-            ${spec("Destino", selected.destination)}
-            ${spec("XYZ", `${selected.x}, ${selected.y}, ${selected.z}`)}
-            ${spec("Dimensoes", `${selected.width} x ${selected.length} x ${selected.height} m`)}
-            ${spec("Status", selected.status)}
-          </dl>
-        </section>
+        ${selectedKind === "zone" ? zoneEditor(selectedZone()) : assetEditor(selected)}
 
-        <section class="move-card">
+        <section class="move-card ${selectedKind === "zone" ? "is-disabled" : ""}">
           <h3>Movimentar ativo</h3>
           <div class="destination-grid">
             ${destinations.map((destination) => `<button type="button" data-move="${destination}">${destination}</button>`).join("")}
@@ -263,16 +269,7 @@ function render() {
             ${events
               .filter((item, index) => item.assetId === selected.id || index < 4)
               .slice(0, 5)
-              .map(
-                (item) => `
-                  <article class="timeline-event">
-                    <time>${item.time}</time>
-                    <strong>${item.assetLabel}</strong>
-                    <p>${item.from} -> ${item.to}</p>
-                    <small>${item.actor} · ${item.authorizer}</small>
-                  </article>
-                `,
-              )
+              .map(timelineEvent)
               .join("")}
           </div>
         </section>
@@ -294,17 +291,162 @@ function bindEvents() {
     render();
   });
 
+  document.getElementById("toggle-edit").addEventListener("click", () => {
+    editMode = !editMode;
+    render();
+  });
+
+  document.getElementById("map-stage").addEventListener("click", repositionSelectedFromMap);
+
   document.querySelectorAll("[data-layer]").forEach((button) => {
     button.addEventListener("click", () => setLayer(button.dataset.layer));
   });
 
   document.querySelectorAll("[data-select]").forEach((button) => {
-    button.addEventListener("click", () => setSelected(button.dataset.select));
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setSelected(button.dataset.select);
+    });
+  });
+
+  document.querySelectorAll("[data-zone]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      setSelectedZone(button.dataset.zone);
+    });
   });
 
   document.querySelectorAll("[data-move]").forEach((button) => {
     button.addEventListener("click", () => moveSelectedAsset(button.dataset.move));
   });
+
+  document.querySelectorAll("[data-edit]").forEach((field) => {
+    field.addEventListener("change", () => {
+      const key = field.dataset.edit;
+      const numeric = ["x", "y", "z", "width", "length", "height", "weight"].includes(key);
+      const value = numeric ? Number(field.value) : field.value;
+      if (selectedKind === "zone") {
+        updateSelectedZone({ [key]: value });
+      } else {
+        updateSelectedAsset({ [key]: value }, "Edicao de propriedade");
+      }
+      render();
+    });
+  });
+}
+
+function assetEditor(selected) {
+  return `
+    <section class="editor-card">
+      <div class="detail-heading">
+        <span class="status-dot risk-${selected.risk}"></span>
+        <div>
+          <h3>Editor do objeto</h3>
+          <p>${selected.id} - ${typeLabels[selected.type]} - ${riskLabels[selected.risk]}</p>
+        </div>
+      </div>
+      <form class="asset-editor" id="asset-editor">
+        ${textField("label", "Nome no mapa", selected.label)}
+        ${selectField("type", "Tipo", selected.type, typeLabels)}
+        ${textField("area", "Area atual", selected.area)}
+        ${textField("owner", "Responsavel", selected.owner)}
+        ${textField("destination", "Destino", selected.destination)}
+        ${textField("status", "Status operacional", selected.status)}
+        ${selectField("risk", "Risco", selected.risk, riskLabels)}
+        <div class="field-row">
+          ${numberField("x", "X", selected.x, 0, 100)}
+          ${numberField("y", "Y", selected.y, 0, 100)}
+          ${numberField("z", "Z", selected.z, 0, 50)}
+        </div>
+        <div class="field-row">
+          ${numberField("width", "Largura", selected.width, 1, 200)}
+          ${numberField("length", "Compr.", selected.length, 1, 200)}
+          ${numberField("height", "Altura", selected.height, 1, 100)}
+        </div>
+        ${numberField("weight", "Peso kg", selected.weight, 0, 100000)}
+      </form>
+    </section>
+  `;
+}
+
+function zoneEditor(selected) {
+  return `
+    <section class="editor-card">
+      <div class="detail-heading">
+        <span class="zone-marker"></span>
+        <div>
+          <h3>Editor da area</h3>
+          <p>${selected.id} - ${selected.type}</p>
+        </div>
+      </div>
+      <form class="asset-editor" id="asset-editor">
+        ${textField("label", "Nome no mapa", selected.label)}
+        ${selectField("type", "Tipo de area", selected.type, {
+          restricted: "Restrita",
+          warehouse: "Armazem",
+          yard: "Patio",
+          gate: "Portao",
+          dock: "Doca",
+        })}
+        <div class="field-row">
+          ${numberField("x", "X", selected.x, 0, 100)}
+          ${numberField("y", "Y", selected.y, 0, 100)}
+          ${numberField("width", "Largura", selected.width, 1, 100)}
+        </div>
+        ${numberField("height", "Altura", selected.height, 1, 100)}
+      </form>
+    </section>
+  `;
+}
+
+function assetRow(item) {
+  return `
+    <button class="asset-row ${item.id === selectedId ? "is-selected" : ""}" data-select="${item.id}">
+      <span class="status-dot risk-${item.risk}"></span>
+      <span>
+        <strong>${escapeHtml(item.label)}</strong>
+        <small>${escapeHtml(item.area)} - ${typeLabels[item.type]}</small>
+      </span>
+    </button>
+  `;
+}
+
+function mapObject(item) {
+  return `
+    <button
+      class="map-object ${item.type} risk-${item.risk} ${item.id === selectedId ? "is-selected" : ""}"
+      style="left:${item.x}%; top:${item.y}%"
+      data-select="${item.id}"
+      aria-label="Selecionar ${escapeHtml(item.label)}"
+    >
+      <span class="object-icon">${typeInitial(item.type)}</span>
+      <span>${escapeHtml(item.label)}</span>
+    </button>
+  `;
+}
+
+function mapZone(item) {
+  return `
+    <button
+      class="map-zone ${item.type} ${selectedKind === "zone" && item.id === selectedId ? "is-selected" : ""}"
+      style="left:${item.x}%; top:${item.y}%; width:${item.width}%; height:${item.height}%"
+      data-zone="${item.id}"
+      aria-label="Editar area ${escapeHtml(item.label)}"
+    >
+      ${escapeHtml(item.label)}
+    </button>
+  `;
+}
+
+function timelineEvent(item) {
+  return `
+    <article class="timeline-event">
+      <time>${item.time}</time>
+      <strong>${escapeHtml(item.assetLabel)}</strong>
+      <p>${escapeHtml(item.from)} -> ${escapeHtml(item.to)}</p>
+      <small>${escapeHtml(item.actor)} - ${escapeHtml(item.authorizer)}</small>
+    </article>
+  `;
 }
 
 function layerButton(layer, label) {
@@ -315,21 +457,34 @@ function metric(label, value, trend) {
   return `<article class="metric-card"><span>${label}</span><strong>${value}</strong><small>${trend}</small></article>`;
 }
 
-function spec(label, value) {
-  return `<div><dt>${label}</dt><dd>${value}</dd></div>`;
+function textField(key, label, value) {
+  return `<label class="field"><span>${label}</span><input data-edit="${key}" value="${escapeHtml(String(value))}" /></label>`;
 }
 
-function iconButton(name, label) {
-  return `<button type="button" aria-label="${label}">${iconSvg(name)}</button>`;
+function numberField(key, label, value, min, max) {
+  return `<label class="field"><span>${label}</span><input type="number" data-edit="${key}" value="${value}" min="${min}" max="${max}" /></label>`;
 }
 
-function iconSvg(name) {
-  const paths = {
-    target: `<circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="2"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path>`,
-    layers: `<path d="m12 3 8 4-8 4-8-4 8-4Z"></path><path d="m4 12 8 4 8-4"></path><path d="m4 17 8 4 8-4"></path>`,
-    shield: `<path d="M12 3 5 6v5c0 4.5 3 7.5 7 10 4-2.5 7-5.5 7-10V6l-7-3Z"></path><path d="m9 12 2 2 4-5"></path>`,
-  };
-  return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
+function selectField(key, label, value, options) {
+  const optionHtml = Object.entries(options)
+    .map(([optionValue, optionLabel]) => `<option value="${optionValue}" ${optionValue === value ? "selected" : ""}>${optionLabel}</option>`)
+    .join("");
+  return `<label class="field"><span>${label}</span><select data-edit="${key}">${optionHtml}</select></label>`;
+}
+
+function typeInitial(type) {
+  return {
+    container: "C",
+    equipment: "E",
+    vehicle: "V",
+    person: "P",
+    gate: "G",
+    sensor: "S",
+  }[type];
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function escapeHtml(value) {
